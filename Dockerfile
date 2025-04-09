@@ -26,9 +26,14 @@ RUN CGO_ENABLED=0 \
 #################################################
 # 2) Runner
 #################################################
-FROM alpine:latest
+FROM python:alpine
 
-RUN apk add --no-cache ca-certificates
+RUN apk update && \
+  apk upgrade && \
+  apk add bash && \
+  apk add --no-cache --virtual build-deps build-base gcc ca-certificates && \
+  pip install aws-sam-cli && \
+  apk del build-deps
 
 COPY --from=builder /bin/invoke-sam /usr/local/bin/invoke-sam
 
