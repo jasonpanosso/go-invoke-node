@@ -1,3 +1,3 @@
-module example.com/go-hello
+module jasonpanosso/go-invoke-sam
 
 go 1.24
