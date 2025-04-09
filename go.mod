@@ -1,3 +1,3 @@
-module jasonpanosso/go-invoke-sam
+module jasonpanosso/go-invoke-node
 
 go 1.24

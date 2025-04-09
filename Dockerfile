@@ -21,33 +21,27 @@ COPY . .
 RUN CGO_ENABLED=0 \
   GOOS=${TARGETOS} \
   GOARCH=${TARGETARCH} \
-  go build -o /bin/invoke-sam
+  go build -o /bin/invoke-node
 
 #################################################
 # 2) Runner
 #################################################
-FROM python:alpine
+FROM node:20-alpine
 
-RUN apk update && \
-  apk upgrade && \
-  apk add bash && \
-  apk add --no-cache --virtual build-deps build-base gcc ca-certificates && \
-  pip install aws-sam-cli && \
-  apk del build-deps
+RUN apk add ca-certificates
 
-COPY --from=builder /bin/invoke-sam /usr/local/bin/invoke-sam
+COPY --from=builder /bin/invoke-node /usr/local/bin/invoke-node
 
 USER nobody:nogroup
 
 ENV PORT=8080 \
-  LAMBDA_FUNCTION=MyFunction \
-  LAMBDA_ENV_FILE="" \
-  TIMEOUT_DURATION=30s \
-  TEMPLATE_PATH=template.yaml
+  SCRIPT="" \
+  SCRIPT_FILE="" \
+  ENV_FILE="" \
+  TIMEOUT_DURATION="30s"
 
 EXPOSE ${PORT}
 
 WORKDIR /
 
-ENTRYPOINT ["invoke-sam"]
-CMD ["--port=${PORT}", "--function=${LAMBDA_FUNCTION}", "--timeout=${TIMEOUT_DURATION}", "--template=${TEMPLATE_PATH}"]
+ENTRYPOINT ["invoke-node"]

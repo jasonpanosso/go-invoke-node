@@ -17,29 +17,28 @@ import (
 )
 
 const (
-	defaultPort     = 8080
-	defaultFunction = "MyFunction"
-	defaultEnvFile  = ""
-	defaultTimeout  = 30 * time.Second
-	defaultTemplate = "template.yaml"
+	defaultPort       = 8080
+	defaultEnvFile    = ""
+	defaultTimeout    = 30 * time.Second
+	defaultInline     = ""
+	defaultScriptFile = ""
 
-	envPortKey     = "PORT"
-	envFunctionKey = "LAMBDA_FUNCTION"
-	envEnvFileKey  = "LAMBDA_ENV_FILE"
-	envTimeoutKey  = "TIMEOUT_DURATION"
-	envTemplateKey = "TEMPLATE_PATH"
+	envPortKey       = "PORT"
+	envInlineKey     = "SCRIPT"
+	envScriptFileKey = "SCRIPT_FILE"
+	envEnvFileKey    = "ENV_FILE"
+	envTimeoutKey    = "TIMEOUT_DURATION"
 )
 
 type Config struct {
-	Port     int
-	Function string
-	EnvFile  string
-	Timeout  time.Duration
-	Template string
+	Port         int
+	InlineScript string
+	ScriptFile   string
+	EnvFile      string
+	Timeout      time.Duration
 }
 
 func (c *Config) LoadEnv() {
-	// PORT
 	if v := os.Getenv(envPortKey); v != "" {
 		p, err := strconv.Atoi(v)
 		if err != nil {
@@ -48,17 +47,22 @@ func (c *Config) LoadEnv() {
 		c.Port = p
 	}
 
-	// LAMBDA_FUNCTION
-	if v := os.Getenv(envFunctionKey); v != "" {
-		c.Function = v
+	if v := os.Getenv(envInlineKey); v != "" {
+		c.InlineScript = v
 	}
 
-	// LAMBDA_ENV_FILE
+	if v := os.Getenv(envScriptFileKey); v != "" {
+		c.ScriptFile = v
+	}
+
+	if c.InlineScript != "" && c.ScriptFile != "" {
+		log.Fatalf("must provide only one of %s or %s, not both", envInlineKey, envScriptFileKey)
+	}
+
 	if v := os.Getenv(envEnvFileKey); v != "" {
 		c.EnvFile = v
 	}
 
-	// TIMEOUT_DURATION
 	if v := os.Getenv(envTimeoutKey); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -66,43 +70,45 @@ func (c *Config) LoadEnv() {
 		}
 		c.Timeout = d
 	}
-
-	// TEMPLATE_PATH
-	if v := os.Getenv(envTemplateKey); v != "" {
-		c.Template = v
-	}
 }
 
 func (c *Config) LoadFlags() {
 	flag.IntVar(&c.Port, "port", c.Port, "port to listen on")
-	flag.StringVar(&c.Function, "function", c.Function, "SAM logical function name to invoke")
-	flag.StringVar(&c.EnvFile, "env-file", c.EnvFile, "path to JSON file of environment variables for sam local invoke")
-	flag.DurationVar(&c.Timeout, "timeout", c.Timeout, "timeout for sam local invoke (e.g. 30s, 1m)")
-	flag.StringVar(&c.Template, "template", c.Template, "path to SAM template.yaml for sam local invoke")
+
+	flag.StringVar(&c.InlineScript, "script", c.InlineScript,
+		"inline JavaScript to evaluate (mutually exclusive with --script-file)")
+	flag.StringVar(&c.ScriptFile, "script-file", c.ScriptFile,
+		"path to JavaScript file to run (mutually exclusive with --script)")
+
+	flag.StringVar(&c.EnvFile, "env-file", c.EnvFile,
+		"path to .env file for the script (optional)")
+	flag.DurationVar(&c.Timeout, "timeout", c.Timeout,
+		"timeout for node invocation (e.g. 30s, 1m)")
+
 	flag.Parse()
+
+	if c.InlineScript != "" && c.ScriptFile != "" {
+		log.Fatal("must provide only one of --script or --script-file, not both")
+	}
 }
 
 func main() {
-	// init with defaults
 	cfg := Config{
-		Port:     defaultPort,
-		Function: defaultFunction,
-		EnvFile:  defaultEnvFile,
-		Timeout:  defaultTimeout,
-		Template: defaultTemplate,
+		Port:         defaultPort,
+		InlineScript: defaultInline,
+		ScriptFile:   defaultScriptFile,
+		EnvFile:      defaultEnvFile,
+		Timeout:      defaultTimeout,
 	}
 
-	// override with env vars
 	cfg.LoadEnv()
-
-	// override with flags
 	cfg.LoadFlags()
+	if (cfg.InlineScript == "") == (cfg.ScriptFile == "") {
+		log.Fatalf("must provide exactly one of --script or --script-file (or via %s, %s environment variables)", envInlineKey, envScriptFileKey)
+	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf(
-		"Starting server on %s (function=%s, env-file=%q, timeout=%s, template=%s)…",
-		addr, cfg.Function, cfg.EnvFile, cfg.Timeout, cfg.Template,
-	)
+	log.Printf("Starting server on %s (timeout=%s)…", addr, cfg.Timeout)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/invoke", makeInvokeHandler(cfg))
@@ -142,16 +148,19 @@ func makeInvokeHandler(cfg Config) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.Timeout)
 		defer cancel()
 
-		args := []string{
-			"local", "invoke", cfg.Function,
-			"--template", cfg.Template,
-			"--event", "-",
-		}
+		args := []string{}
+
 		if cfg.EnvFile != "" {
-			args = append(args, "--env-vars", cfg.EnvFile)
+			args = append(args, "--env-file", cfg.EnvFile)
 		}
 
-		cmd := exec.CommandContext(ctx, "sam", args...)
+		if cfg.InlineScript != "" {
+			args = append(args, "-e", cfg.InlineScript)
+		} else {
+			args = append(args, cfg.ScriptFile)
+		}
+
+		cmd := exec.CommandContext(ctx, "node", args...)
 		cmd.Stdin = bytes.NewReader(payload)
 
 		var outBuf, errBuf bytes.Buffer
@@ -159,13 +168,15 @@ func makeInvokeHandler(cfg Config) http.HandlerFunc {
 		cmd.Stderr = &errBuf
 
 		if err := cmd.Run(); err != nil {
-			log.Printf("sam invoke error: %v, stderr: %s", err, errBuf.String())
+			log.Println(outBuf.String())
+			log.Printf("node error: %v, stderr: %s", err, errBuf.String())
 			http.Error(w,
-				"sam invoke failed: "+firstLine(errBuf.String(), err.Error()),
+				"node.js failed: "+firstLine(errBuf.String(), err.Error()),
 				http.StatusInternalServerError,
 			)
 			return
 		}
+		log.Println(outBuf.String())
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
